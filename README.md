@@ -2,6 +2,16 @@
 
 A clean, educational implementation of Trust Region Policy Optimization (TRPO) for continuous control tasks using PyTorch and Gymnasium.
 
+## 🎬 Trained Policy in Action
+
+<div align="center">
+
+![TRPO Trained Policy](assets/epoch_800-episode-0.gif)
+
+*TRPO-trained agent successfully balancing the Pendulum-v1 environment after 800 epochs of training. The policy learns to swing up and stabilize the pendulum at the upright position with minimal torque.*
+
+</div>
+
 ## 📋 Overview
 
 This project implements TRPO, a model-free reinforcement learning algorithm that ensures monotonic policy improvement through trust region constraints. The implementation uses:
