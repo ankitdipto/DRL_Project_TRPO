@@ -1,0 +1,41 @@
+# IDE
+.vscode/*
+.zed/*
+.idea/*
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Training outputs
+runs/*
+videos/*
+checkpoints/*
+*.pth
+*.pt
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Environment
+venv/
+env/
+ENV/
+.env

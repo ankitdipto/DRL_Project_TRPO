@@ -1,0 +1,23 @@
+# Deep Learning
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Reinforcement Learning Environment
+gymnasium>=0.29.0
+gymnasium[classic-control]
+
+# Logging and Visualization
+tensorboard>=2.14.0
+
+# Utilities
+numpy>=1.24.0
+tqdm>=4.65.0
+
+# Video Recording (optional, for saving evaluation videos)
+opencv-python>=4.8.0
+moviepy>=1.0.3
+
+# For MuJoCo environments (optional)
+# mujoco>=2.3.0
+# gymnasium[mujoco]
+
