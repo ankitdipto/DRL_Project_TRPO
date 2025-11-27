@@ -17,6 +17,9 @@ tqdm>=4.65.0
 opencv-python>=4.8.0
 moviepy>=1.0.3
 
+# Web streaming
+flask>=2.3.0
+
 # For MuJoCo environments (optional)
 # mujoco>=2.3.0
 # gymnasium[mujoco]
