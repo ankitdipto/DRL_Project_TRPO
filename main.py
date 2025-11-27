@@ -268,7 +268,7 @@ def train_trpo(
     
     value_func_optimizer = optim.Adam(value_net.parameters(), lr=3e-4)
 
-    run_name = f"pendulum_{datetime.now().strftime('%m_%d_%H_%M_%S')}"
+    run_name = f"bipedal_walker_{datetime.now().strftime('%m_%d_%H_%M_%S')}"
     run_dir = os.path.join(log_dir, run_name)
     writer = SummaryWriter(log_dir=run_dir)
     
@@ -397,24 +397,24 @@ def train_trpo(
 if __name__ == "__main__":
     # Example: Train TRPO on Pendulum-v1 with 8 parallel environments
     print("=" * 60)
-    print("Training TRPO on Pendulum-v1")
+    print("Training TRPO on BipedalWalker-v3")
     print("=" * 60)
     
     # Create vectorized environment for training
     num_envs = 16
     envs = gym.vector.SyncVectorEnv([
-        lambda: gym.make("Pendulum-v1") for _ in range(num_envs)
+        lambda: gym.make("BipedalWalker-v3") for _ in range(num_envs)
     ])
     
     # Create separate environment for evaluation/video recording
     # Use render_mode="rgb_array" for video recording (works on remote servers)
-    eval_env = gym.make("Pendulum-v1", render_mode="rgb_array")
+    eval_env = gym.make("BipedalWalker-v3", render_mode="rgb_array")
     
     # Get environment dimensions
-    obs_dim = 3  # Pendulum has 3D observations: [cos(theta), sin(theta), theta_dot]
-    act_dim = 1  # Pendulum has 1D continuous action: torque
+    obs_dim = 24  # BipedalWalker-v3 has 24D observations
+    act_dim = 4  # BipedalWalker-v3 has 4D continuous action
     
-    print(f"Environment: Pendulum-v1")
+    print(f"Environment: BipedalWalker-v3")
     print(f"Number of parallel environments: {num_envs}")
     print(f"Observation dimension: {obs_dim}")
     print(f"Action dimension: {act_dim}")
@@ -434,7 +434,7 @@ if __name__ == "__main__":
         steps_per_epoch=200,
         gamma=0.99,
         lam=0.97,
-        log_dir="runs/trpo_pendulum",
+        log_dir="runs/trpo_bipedal_walker",
         n_envs=num_envs,
         n_obs=obs_dim,
         n_acts=act_dim,
@@ -462,6 +462,6 @@ if __name__ == "__main__":
     
     print("\n" + "=" * 60)
     print("Training complete!")
-    print("View logs with: tensorboard --logdir=runs/trpo_pendulum")
+    print("View logs with: tensorboard --logdir=runs/trpo_bipedal_walker")
     print(f"View videos in: {run_dir}/")
     print("=" * 60)

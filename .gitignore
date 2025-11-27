@@ -39,3 +39,6 @@ venv/
 env/
 ENV/
 .env
+
+# Videos
+outputs/*
