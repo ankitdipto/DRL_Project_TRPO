@@ -42,6 +42,7 @@ class QuadrupedEnvCPG(gym.Env):
         timestep: Optional[float] = None,
         damping_scale: float = 1.0,
         stiffness_scale: float = 1.0,
+        camera_mode: str = 'follow',  # 'follow', 'fixed', 'side', 'top'
     ):
         """
         Initialize CPG-based quadruped environment.
@@ -56,6 +57,7 @@ class QuadrupedEnvCPG(gym.Env):
             timestep: MuJoCo timestep (overrides XML default)
             damping_scale: Scale factor for joint damping (default: 1.0, use <1.0 to reduce damping)
             stiffness_scale: Scale factor for actuator stiffness kp (default: 1.0, use <1.0 to reduce stiffness)
+            camera_mode: Camera tracking mode - 'follow' (tracks robot), 'fixed' (static), 'side' (side view), 'top' (top-down)
         """
         super().__init__()
         
@@ -64,6 +66,7 @@ class QuadrupedEnvCPG(gym.Env):
         self.max_episode_steps = max_episode_steps
         self.frame_skip = frame_skip
         self.gait_type = gait_type
+        self.camera_mode = camera_mode
         
         # Load MuJoCo model
         self.model = mujoco.MjModel.from_xml_path(model_path)  # pyright: ignore
@@ -106,13 +109,6 @@ class QuadrupedEnvCPG(gym.Env):
             low=-obs_high, high=obs_high, dtype=np.float32
         )
         
-        # Define action space (16 dimensions - CPG parameters)
-        # [frequency(1), hip_amp(1), thigh_amp(1), calf_amp(1), stance_offsets(12)]
-        # action_low = np.array([0.1, -0.86, -0.68, -2.82] + [-0.1] * 12, dtype=np.float32)
-        # action_high = np.array([1.0, 0.86, 4.50, -0.89] + [0.1] * 12, dtype=np.float32)
-        # self.action_space = spaces.Box(
-        #     low=action_low, high=action_high, dtype=np.float32
-        # )
         action_low = np.array([-1.0] * 12, dtype=np.float32)
         action_high = np.array([1.0] * 12, dtype=np.float32)
         self.action_space = spaces.Box(
@@ -123,8 +119,9 @@ class QuadrupedEnvCPG(gym.Env):
         self.current_step = 0
         self.episode_reward = 0.0
         
-        # Renderer
+        # Renderer and camera
         self._renderer = None
+        self._camera = None
         
         # Previous joint commands for smoothness reward
         self._prev_joint_commands = np.zeros(12, dtype=np.float32)
@@ -160,34 +157,8 @@ class QuadrupedEnvCPG(gym.Env):
             base_controller[leg_idx * 3 + 2] = standing_pose[leg_idx * 3 + 2] - \
                 AMP_CALF * np.maximum(0, np.sin(leg_phase))
             
-        # print(f"Current Step: {self.current_step}")
-        # print(f"t: {t}")
-        # print(f"leg_phase: {leg_phase}")
-        # print(f"hip: {base_controller[leg_idx * 3 + 0]}")
-        # print(f"thigh: {base_controller[leg_idx * 3 + 1]}")
-        # print(f"calf: {base_controller[leg_idx * 3 + 2]}")
         return base_controller
 
-    def _parse_cpg_params(self, action: np.ndarray) -> Dict[str, Any]:
-        """
-        Parse action array into CPG parameter dictionary.
-        
-        Args:
-            action: (16,) array of CPG parameters
-            
-        Returns:
-            Dictionary with CPG parameters
-        """
-
-        raise NotImplementedError("Not implemented")
-        params = {
-            'frequency': float(action[0]),
-            'hip_amplitude': float(action[1]),
-            'thigh_amplitude': float(action[2]),
-            'calf_amplitude': float(action[3]),
-            'stance_offset': action[4:16].astype(np.float32),
-        }
-        return params
     
     def _get_obs(self) -> np.ndarray:
         """Get observation (same as standard environment)."""
@@ -325,9 +296,6 @@ class QuadrupedEnvCPG(gym.Env):
         
         mujoco.mj_forward(self.model, self.data)  # pyright: ignore
         
-        # Reset CPG
-        # self.cpg.reset()
-        
         # Reset tracking
         self.current_step = 0
         self.episode_reward = 0.0
@@ -352,18 +320,9 @@ class QuadrupedEnvCPG(gym.Env):
         #print("action shape: ", action.shape)
         res_action = np.clip(action, self.action_space.low, self.action_space.high)  # pyright: ignore
         
-        # Parse CPG parameters
-        # cpg_params = self._parse_cpg_params(action)
-        
-        # Generate joint commands from CPG
-        # dt = self.model.opt.timestep * self.frame_skip
-        # joint_commands = self.cpg.generate(cpg_params, dt)
         res_action = 0.2 * res_action
         t = self.current_step * self.model.opt.timestep * self.frame_skip
         joint_commands = self._get_trotting_base_controller(t) + res_action
-        # print(f"residual action: {res_action}")
-        # print(f"base controller: {self._get_trotting_base_controller(self.current_step)}")
-        # print(f"joint commands: {joint_commands}")
 
         # Clip joint commands to actuator limits
         joint_commands = np.clip(
@@ -399,12 +358,6 @@ class QuadrupedEnvCPG(gym.Env):
             **reward_info,
             'step': self.current_step,
             'episode_reward': self.episode_reward,
-            # 'cpg_frequency': cpg_params['frequency'],
-            # 'cpg_amp_mean': np.mean([
-            #     cpg_params['hip_amplitude'],
-            #     cpg_params['thigh_amplitude'],
-            #     cpg_params['calf_amplitude']
-            #]),
         }
         
         if terminated:
@@ -414,13 +367,63 @@ class QuadrupedEnvCPG(gym.Env):
         
         return obs, reward, terminated, truncated, info
     
+    def _update_camera(self):
+        """
+        Update camera position based on camera_mode.
+        Inspired by stream_unitree_go1.py camera following feature.
+        """
+        if self._camera is None:
+            return
+        
+        # Get robot base position (center of the robot)
+        robot_pos = self.data.qpos[0:3].copy()  # [x, y, z]
+        
+        if self.camera_mode == "follow":
+            # Follow camera: tracks robot from behind and above
+            lookat_offset = np.array([0.5, 0.0, 0.0])  # Look slightly ahead
+            
+            self._camera.lookat[:] = robot_pos + lookat_offset
+            self._camera.distance = 2.5
+            self._camera.azimuth = 90  # View from behind
+            self._camera.elevation = -20  # Slight downward angle
+            
+        elif self.camera_mode == "side":
+            # Side view: follows robot from the side
+            self._camera.lookat[:] = robot_pos
+            self._camera.distance = 2.5
+            self._camera.azimuth = 0  # View from side
+            self._camera.elevation = -15
+            
+        elif self.camera_mode == "top":
+            # Top-down view: bird's eye view
+            self._camera.lookat[:] = robot_pos
+            self._camera.distance = 3.0
+            self._camera.azimuth = 90
+            self._camera.elevation = -89  # Almost straight down
+            
+        elif self.camera_mode == "fixed":
+            # Fixed view: static camera at origin
+            self._camera.lookat[:] = np.array([0.0, 0.0, 0.3])
+            self._camera.distance = 3.0
+            self._camera.azimuth = 90
+            self._camera.elevation = -20
+    
     def render(self) -> Optional[np.ndarray]:
         """Render the environment."""
         if self.render_mode == "rgb_array":
             if self._renderer is None:
                 self._renderer = mujoco.Renderer(self.model, height=480, width=640)
             
-            self._renderer.update_scene(self.data)
+            # Initialize camera if not already created
+            if self._camera is None:
+                self._camera = mujoco.MjvCamera()  # pyright: ignore
+                mujoco.mjv_defaultFreeCamera(self.model, self._camera)  # pyright: ignore
+            
+            # Update camera position based on robot position
+            self._update_camera()
+            
+            # Render with camera
+            self._renderer.update_scene(self.data, camera=self._camera)
             pixels = self._renderer.render()
             return pixels
         
@@ -431,78 +434,7 @@ class QuadrupedEnvCPG(gym.Env):
         if self._renderer is not None:
             del self._renderer
             self._renderer = None
-
-
-if __name__ == "__main__":
-    """Test CPG-based environment."""
-    print("=" * 70)
-    print("Testing CPG-Based Quadruped Environment")
-    print("=" * 70)
-    
-    # Load environment
-    menagerie_path = "/home/asinha389/Documents/DRL_Project_TRPO/mujoco_menagerie"
-    model_path = os.path.join(menagerie_path, "unitree_go1/scene.xml")
-    
-    print(f"\nCreating environment...")
-    env = QuadrupedEnvCPG(
-        model_path=model_path,
-        gait_type='trot',
-        max_episode_steps=200
-    )
-    
-    print(f"  Observation space: {env.observation_space.shape}")
-    print(f"  Action space: {env.action_space.shape}")
-    print(f"  Action space: CPG parameters (16D)")
-    print(f"    [0]: frequency [0.5, 3.0] Hz")
-    print(f"    [1]: hip amplitude [0.0, 0.3] rad")
-    print(f"    [2]: thigh amplitude [0.0, 0.8] rad")
-    print(f"    [3]: calf amplitude [0.0, 1.2] rad")
-    print(f"    [4-15]: stance offsets [-0.5, 0.5] rad")
-    
-    # Test reset
-    print(f"\nTesting reset...")
-    obs, info = env.reset(seed=42)
-    print(f"  Initial observation shape: {obs.shape}")
-    print(f"  Initial base height: {env.data.qpos[2]:.3f} m")
-    
-    # Test steps with fixed CPG parameters
-    print(f"\nTesting steps with fixed CPG parameters...")
-    
-    # Set reasonable CPG parameters
-    action = np.array([
-        1.5,    # frequency: 1.5 Hz
-        0.1,    # hip amplitude
-        0.3,    # thigh amplitude
-        0.4,    # calf amplitude
-        0.0, 0.0, 0.0,  # FR offsets
-        0.0, 0.0, 0.0,  # FL offsets
-        0.0, 0.0, 0.0,  # RR offsets
-        0.0, 0.0, 0.0,  # RL offsets
-    ], dtype=np.float32)
-    
-    total_reward = 0.0
-    for step in range(100):
-        obs, reward, terminated, truncated, info = env.step(action)
-        total_reward += reward
-        
-        if step % 20 == 0:
-            print(f"  Step {step}: reward={reward:.3f}, height={info['base_height']:.3f}, "
-                  f"vel={info['forward_velocity']:.3f}")
-        
-        if terminated or truncated:
-            print(f"  Episode ended at step {step}")
-            break
-    
-    print(f"\nTotal reward: {total_reward:.2f}")
-    print(f"Average reward per step: {total_reward / (step + 1):.3f}")
-    
-    env.close()
-    
-    print("\n" + "=" * 70)
-    print("CPG environment test complete!")
-    print("\nKey differences from standard environment:")
-    print("  - Action space: 16D (CPG params) vs 12D (joint positions)")
-    print("  - Built-in periodicity via CPG")
-    print("  - Smoother joint trajectories")
-    print("  - Easier to learn structured gaits")
+        if self._camera is not None:
+            del self._camera
+            self._camera = None
 

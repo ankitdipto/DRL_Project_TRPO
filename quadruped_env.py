@@ -46,6 +46,7 @@ class QuadrupedEnv(gym.Env):
         timestep: Optional[float] = None,
         damping_scale: float = 1.0,
         stiffness_scale: float = 1.0,
+        camera_mode: str = 'follow',  # 'follow', 'fixed', 'side', 'top'
     ):
         """
         Initialize the quadruped environment.
@@ -59,6 +60,7 @@ class QuadrupedEnv(gym.Env):
             timestep: Simulation timestep in seconds (overrides XML default if provided)
             damping_scale: Scale factor for joint damping (default: 1.0, use <1.0 to reduce damping)
             stiffness_scale: Scale factor for actuator stiffness kp (default: 1.0, use <1.0 to reduce stiffness)
+            camera_mode: Camera tracking mode - 'follow' (tracks robot), 'fixed' (static), 'side' (side view), 'top' (top-down)
         """
         super().__init__()
         
@@ -66,6 +68,7 @@ class QuadrupedEnv(gym.Env):
         self.render_mode = render_mode
         self.max_episode_steps = max_episode_steps
         self.frame_skip = frame_skip
+        self.camera_mode = camera_mode
         
         # Load MuJoCo model
         self.model = mujoco.MjModel.from_xml_path(model_path)  # pyright: ignore
@@ -124,8 +127,9 @@ class QuadrupedEnv(gym.Env):
         self.current_step = 0
         self.episode_reward = 0.0
         
-        # Renderer (lazy initialization)
+        # Renderer and camera (lazy initialization)
         self._renderer = None
+        self._camera = None
         
         # Initial state for reset
         self._initial_qpos = None
@@ -351,6 +355,47 @@ class QuadrupedEnv(gym.Env):
         
         return obs, reward, terminated, truncated, info
     
+    def _update_camera(self):
+        """
+        Update camera position based on camera_mode.
+        Inspired by stream_unitree_go1.py camera following feature.
+        """
+        if self._camera is None:
+            return
+        
+        # Get robot base position (center of the robot)
+        robot_pos = self.data.qpos[0:3].copy()  # [x, y, z]
+        
+        if self.camera_mode == "follow":
+            # Follow camera: tracks robot from behind and above
+            lookat_offset = np.array([0.5, 0.0, 0.0])  # Look slightly ahead
+            
+            self._camera.lookat[:] = robot_pos + lookat_offset
+            self._camera.distance = 2.5
+            self._camera.azimuth = 90  # View from behind
+            self._camera.elevation = -20  # Slight downward angle
+            
+        elif self.camera_mode == "side":
+            # Side view: follows robot from the side
+            self._camera.lookat[:] = robot_pos
+            self._camera.distance = 2.5
+            self._camera.azimuth = 0  # View from side
+            self._camera.elevation = -15
+            
+        elif self.camera_mode == "top":
+            # Top-down view: bird's eye view
+            self._camera.lookat[:] = robot_pos
+            self._camera.distance = 3.0
+            self._camera.azimuth = 90
+            self._camera.elevation = -89  # Almost straight down
+            
+        elif self.camera_mode == "fixed":
+            # Fixed view: static camera at origin
+            self._camera.lookat[:] = np.array([0.0, 0.0, 0.3])
+            self._camera.distance = 3.0
+            self._camera.azimuth = 90
+            self._camera.elevation = -20
+    
     def render(self) -> Optional[np.ndarray]:
         """
         Render the environment.
@@ -362,7 +407,16 @@ class QuadrupedEnv(gym.Env):
             if self._renderer is None:
                 self._renderer = mujoco.Renderer(self.model, height=480, width=640)
             
-            self._renderer.update_scene(self.data)
+            # Initialize camera if not already created
+            if self._camera is None:
+                self._camera = mujoco.MjvCamera()  # pyright: ignore
+                mujoco.mjv_defaultFreeCamera(self.model, self._camera)  # pyright: ignore
+            
+            # Update camera position based on robot position
+            self._update_camera()
+            
+            # Render with camera
+            self._renderer.update_scene(self.data, camera=self._camera)
             pixels = self._renderer.render()
             return pixels
         
@@ -373,6 +427,9 @@ class QuadrupedEnv(gym.Env):
         if self._renderer is not None:
             del self._renderer
             self._renderer = None
+        if self._camera is not None:
+            del self._camera
+            self._camera = None
 
 
 class CustomVectorizedQuadrupedEnv:
