@@ -2,8 +2,8 @@
     "pythonVersion": "3.11",
     "pythonPlatform": "Linux",
     "typeCheckingMode": "basic",
-    "venvPath": "/home/hice1/asinha389/.conda/envs",
-    "venv": "DRL_HW",
+    "venvPath": "/home/asinha389/miniconda3/envs",
+    "venv": "DRL_PJ",
     "exclude": ["**/node_modules", "**/__pycache__", ".git"],
     "ignore": ["**/migrations", "**/tests"]
 }

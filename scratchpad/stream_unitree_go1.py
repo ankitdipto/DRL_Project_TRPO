@@ -15,7 +15,7 @@ import threading
 import time
 
 # Path to the Unitree Go1 scene
-MENAGERIE_PATH = "/home/hice1/asinha389/scratch/mujoco_menagerie"
+MENAGERIE_PATH = "/home/asinha389/Documents/DRL_Project_TRPO/mujoco_menagerie"
 GO1_SCENE_PATH = os.path.join(MENAGERIE_PATH, "unitree_go1/scene.xml")
 
 # Global variables for frame sharing

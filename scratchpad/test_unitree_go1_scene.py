@@ -10,10 +10,11 @@ os.environ['MUJOCO_GL'] = 'egl'  # Use EGL for headless rendering
 import numpy as np
 import mujoco
 import imageio
+from typing import Dict, Any
 
 
 # Path to the Unitree Go1 scene (includes robot + ground + lighting)
-MENAGERIE_PATH = "/home/hice1/asinha389/scratch/mujoco_menagerie"
+MENAGERIE_PATH = "/home/asinha389/Documents/DRL_Project_TRPO/mujoco_menagerie"
 GO1_SCENE_PATH = os.path.join(MENAGERIE_PATH, "unitree_go1/scene.xml")
 
 
@@ -86,14 +87,82 @@ def get_observation(model, data):
     return obs
 
 
-def run_simulation(duration=5.0, fps=30, control_mode="zero", output_name=None):
+def generate_trot_in_place(t, model, frequency=1.5):
+    """
+    Generate in-place trotting gait commands.
+    
+    Trotting pattern:
+    - Diagonal pairs: FR+RL move together, FL+RR move together
+    - Phase offset: 180° between pairs
+    
+    Args:
+        t: Current time in seconds
+        model: MuJoCo model (for joint limits)
+        frequency: Trotting frequency in Hz
+        
+    Returns:
+        action: (12,) array of joint position commands
+    """
+    # Get joint limits from model
+    ctrl_low = model.actuator_ctrlrange[:, 0]
+    ctrl_high = model.actuator_ctrlrange[:, 1]
+    
+    # Standing pose (neutral position)
+    standing_pose = np.array([
+        0.0, 0.9, -1.8,  # FR
+        0.0, 0.9, -1.8,  # FL
+        0.0, 0.9, -1.8,  # RR
+        0.0, 0.9, -1.8,  # RL
+    ])
+
+    #standing_pose = model.keyframe('standing').qpos
+    
+    # Amplitudes for each joint type (respecting limits)
+    amp_hip = 0.0      # Small hip abduction/adduction
+    amp_thigh = 0.3    # Thigh swing for leg lift
+    amp_calf = 0.3    # Calf flexion for foot clearance
+    
+    # Phase for trotting
+    phase = 2 * np.pi * frequency * t
+    
+    # Leg phases: FR=0, FL=π, RR=π, RL=0 (diagonal pairs)
+    leg_phases = np.array([0.0, np.pi, np.pi, 0.0])
+    
+    action = np.zeros(12)
+    
+    for leg_idx in range(4):
+        leg_phase = phase + leg_phases[leg_idx]
+        
+        # Hip joint (minimal motion)
+        action[leg_idx * 3 + 0] = standing_pose[leg_idx * 3 + 0] + amp_hip * np.sin(leg_phase)
+        
+        # Thigh joint (lift leg during swing phase)
+        # Positive thigh angle lifts the leg
+        thigh_motion = amp_thigh * np.sin(leg_phase)
+        action[leg_idx * 3 + 1] = standing_pose[leg_idx * 3 + 1] + thigh_motion
+        
+        # Calf joint (retract during swing phase for ground clearance)
+        # Only retract during positive phase (leg lifted)
+        calf_retraction = amp_calf * np.maximum(0, np.sin(leg_phase))
+        action[leg_idx * 3 + 2] = standing_pose[leg_idx * 3 + 2] - calf_retraction
+
+        # calf_motion = amp_calf * np.sin(leg_phase)
+        # action[leg_idx * 3 + 2] = standing_pose[leg_idx * 3 + 2] + calf_motion
+    
+    # Clip to joint limits
+    action = np.clip(action, ctrl_low, ctrl_high)
+    
+    return action
+
+
+def run_simulation(duration=5.0, fps=30, control_mode="zero", output_name=None) -> Dict[str, Any]:
     """
     Run a simulation of the Unitree Go1 robot with proper scene.
     
     Args:
         duration: Simulation duration in seconds
         fps: Frames per second for video output
-        control_mode: "zero" (no control), "random" (random actions), or "standing" (hold standing pose)
+        control_mode: "zero", "random", "standing", or "trot_in_place"
         output_name: Custom output filename (without extension)
     """
     
@@ -174,6 +243,9 @@ def run_simulation(duration=5.0, fps=30, control_mode="zero", output_name=None):
                 0.0, 0.9, -1.8,  # RL
             ])
             action = standing_pose
+        elif control_mode == "trot_in_place":
+            # Generate trotting gait (in place)
+            action = generate_trot_in_place(t, model, frequency=1.0)
         else:
             action = np.zeros(model.nu)
         
@@ -206,6 +278,14 @@ def run_simulation(duration=5.0, fps=30, control_mode="zero", output_name=None):
             print(f"  Frame {i+1:3d}/{n_frames} | t={t:5.2f}s | "
                   f"Height: {base_height:5.3f}m | "
                   f"Vel: [{base_vel[0]:6.3f}, {base_vel[1]:6.3f}, {base_vel[2]:6.3f}]")
+            
+            # Additional debug for trotting gait
+            if control_mode == "trot_in_place" and i == 0:
+                print(f"  Trotting pattern: FR+RL together, FL+RR together")
+                print(f"  Joint ranges used:")
+                for j in range(model.nu):
+                    ctrl_range = model.actuator_ctrlrange[j]
+                    print(f"    Joint {j}: [{ctrl_range[0]:.3f}, {ctrl_range[1]:.3f}] rad")
     
     # Convert trajectory to numpy arrays
     trajectory['observations'] = np.array(trajectory['observations'])  # pyright: ignore[reportArgumentType]
@@ -284,21 +364,37 @@ if __name__ == "__main__":
         output_name="go1_scene_standing_control"
     )
     
+    # Test 4: In-place trotting gait
+    print("\n\n" + "=" * 70)
+    print("TEST 4: In-Place Trotting Gait (with Ground)")
+    print("=" * 70)
+    traj_trot = run_simulation(
+        duration=10.0,
+        fps=30,
+        control_mode="trot_in_place",
+        output_name="go1_scene_trot_in_place"
+    )
+    
     print("\n\n" + "=" * 70)
     print("ALL TESTS COMPLETE!")
     print("=" * 70)
     print("\nGenerated videos (WITH GROUND PLANE):")
-    print("  1. outputs/go1_scene_zero_control.mp4     - Robot with no control")
-    print("  2. outputs/go1_scene_random_control.mp4   - Robot with random actions")
-    print("  3. outputs/go1_scene_standing_control.mp4 - Robot trying to stand")
+    print("  1. outputs/go1_scene_zero_control.mp4      - Robot with no control")
+    print("  2. outputs/go1_scene_random_control.mp4    - Robot with random actions")
+    print("  3. outputs/go1_scene_standing_control.mp4  - Robot trying to stand")
+    print("  4. outputs/go1_scene_trot_in_place.mp4     - Robot trotting in place")
     print("\nKey Observations:")
     print("  - With ground plane, robot lands and interacts with surface")
     print("  - Standing control should maintain upright posture")
     print("  - Random control shows various dynamic behaviors")
+    print("  - Trotting shows diagonal pair coordination (FR+RL, FL+RR)")
+    print("\nTrotting Gait Details:")
+    print("  - Frequency: 1.5 Hz (90 steps/min)")
+    print("  - Pattern: Diagonal pairs alternate")
+    print("  - Respects joint limits from MJCF model")
     print("\nNext steps:")
-    print("  - Review videos to understand robot-ground interactions")
-    print("  - Design reward function for locomotion")
-    print("  - Create Gymnasium environment wrapper")
-    print("  - Integrate with TRPO training pipeline")
+    print("  - Review trotting video for gait quality")
+    print("  - Adjust amplitudes/frequency if needed")
+    print("  - Use this pattern as baseline for CPG training")
     print("=" * 70)
 

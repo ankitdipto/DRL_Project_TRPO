@@ -9,6 +9,10 @@ gymnasium[classic-control]
 # Logging and Visualization
 tensorboard>=2.14.0
 
+# Configuration Management
+hydra-core>=1.3.0
+omegaconf>=2.3.0
+
 # Utilities
 numpy>=1.24.0
 tqdm>=4.65.0

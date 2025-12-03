@@ -42,7 +42,10 @@ class QuadrupedEnv(gym.Env):
         render_mode: Optional[str] = None,
         max_episode_steps: int = 1000,
         reward_weights: Optional[Dict[str, float]] = None,
-        frame_skip: int = 1,
+        frame_skip: int = 25,
+        timestep: Optional[float] = None,
+        damping_scale: float = 1.0,
+        stiffness_scale: float = 1.0,
     ):
         """
         Initialize the quadruped environment.
@@ -53,6 +56,9 @@ class QuadrupedEnv(gym.Env):
             max_episode_steps: Maximum steps per episode
             reward_weights: Dictionary of reward component weights
             frame_skip: Number of simulation steps per environment step
+            timestep: Simulation timestep in seconds (overrides XML default if provided)
+            damping_scale: Scale factor for joint damping (default: 1.0, use <1.0 to reduce damping)
+            stiffness_scale: Scale factor for actuator stiffness kp (default: 1.0, use <1.0 to reduce stiffness)
         """
         super().__init__()
         
@@ -63,6 +69,22 @@ class QuadrupedEnv(gym.Env):
         
         # Load MuJoCo model
         self.model = mujoco.MjModel.from_xml_path(model_path)  # pyright: ignore
+        
+        # Override timestep if provided
+        if timestep is not None:
+            self.model.opt.timestep = timestep
+        
+        # Modify joint damping (applies to all DOFs)
+        if damping_scale != 1.0:
+            self.model.dof_damping[:] *= damping_scale
+        
+        # Modify actuator stiffness (kp) for position actuators
+        if stiffness_scale != 1.0:
+            # For position actuators, kp is stored in actuator_gainprm[:, 0]
+            for i in range(self.model.nu):
+                if self.model.actuator_gaintype[i] == mujoco.mjtGain.mjGAIN_POSITION:  # pyright: ignore
+                    self.model.actuator_gainprm[i, 0] *= stiffness_scale
+        
         self.data = mujoco.MjData(self.model)  # pyright: ignore
         
         # Reward weights (can be customized)
@@ -372,7 +394,10 @@ class CustomVectorizedQuadrupedEnv:
         max_episode_steps: int = 1000,
         reward_weights: Optional[Dict[str, float]] = None,
         num_threads: int = 4,
-        frame_skip: int = 1,
+        frame_skip: int = 25,
+        timestep: Optional[float] = None,
+        damping_scale: float = 1.0,
+        stiffness_scale: float = 1.0,
     ):
         """
         Initialize vectorized environment.
@@ -384,6 +409,9 @@ class CustomVectorizedQuadrupedEnv:
             reward_weights: Dictionary of reward component weights
             num_threads: Number of threads for parallel simulation
             frame_skip: Number of simulation steps per environment step
+            timestep: Simulation timestep in seconds (overrides XML default if provided)
+            damping_scale: Scale factor for joint damping (default: 1.0, use <1.0 to reduce damping)
+            stiffness_scale: Scale factor for actuator stiffness kp (default: 1.0, use <1.0 to reduce stiffness)
         """
         self.model_path = model_path
         self.num_envs = num_envs
@@ -393,6 +421,20 @@ class CustomVectorizedQuadrupedEnv:
         
         # Load model
         self.model = mujoco.MjModel.from_xml_path(model_path)  # pyright: ignore
+        
+        # Override timestep if provided
+        if timestep is not None:
+            self.model.opt.timestep = timestep
+        
+        # Modify joint damping (applies to all DOFs)
+        if damping_scale != 1.0:
+            self.model.dof_damping[:] *= damping_scale
+        
+        # Modify actuator stiffness (kp) for position actuators
+        if stiffness_scale != 1.0:
+            # For position actuators, kp is stored in actuator_gainprm[:, 0]
+            self.model.actuator_gainprm[:, 0] *= stiffness_scale
+        
         self.data = mujoco.MjData(self.model)  # pyright: ignore
         
         # Create MjData instances for each thread
@@ -724,6 +766,9 @@ def make_quadruped_env(
     num_envs: int = 16,
     model_path: Optional[str] = None,
     use_rollout: bool = True,
+    timestep: Optional[float] = None,
+    damping_scale: float = 1.0,
+    stiffness_scale: float = 1.0,
     **kwargs
 ):  # pyright: ignore[reportReturnType]
     """
@@ -734,6 +779,9 @@ def make_quadruped_env(
         model_path: Path to MuJoCo XML file (default: Go1 scene)
         use_rollout: If True, use VectorizedQuadrupedEnv (rollout-based, faster)
                      If False, use gym.vector.SyncVectorEnv (standard Gym)
+        timestep: Simulation timestep in seconds (overrides XML default if provided)
+        damping_scale: Scale factor for joint damping (default: 1.0, use <1.0 to reduce damping)
+        stiffness_scale: Scale factor for actuator stiffness kp (default: 1.0, use <1.0 to reduce stiffness)
         **kwargs: Additional arguments passed to environment constructor
         
     Returns:
@@ -749,12 +797,21 @@ def make_quadruped_env(
         return CustomVectorizedQuadrupedEnv(
             model_path=model_path,
             num_envs=num_envs,
+            timestep=timestep,
+            damping_scale=damping_scale,
+            stiffness_scale=stiffness_scale,
             **kwargs
         )
     else:
         # Use standard Gym vectorized environment
         def make_env():
-            return QuadrupedEnv(model_path=model_path, **kwargs)
+            return QuadrupedEnv(
+                model_path=model_path,
+                timestep=timestep,
+                damping_scale=damping_scale,
+                stiffness_scale=stiffness_scale,
+                **kwargs
+            )
         
         return gym.vector.SyncVectorEnv([make_env for _ in range(num_envs)])
 
