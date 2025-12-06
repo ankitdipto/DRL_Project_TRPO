@@ -1,225 +1,173 @@
-# Trust Region Policy Optimization (TRPO) Implementation
+# Trust Region Policy Optimization (TRPO) with Gait Priors
 
-A clean, educational implementation of Trust Region Policy Optimization (TRPO) for continuous control tasks using PyTorch and Gymnasium.
-
-## 🎬 Trained Policy in Action
-
-<div align="center">
-
-![TRPO Trained Policy](assets/epoch_800-episode-0.gif)
-
-*TRPO-trained agent successfully balancing the Pendulum-v1 environment after 800 epochs of training. The policy learns to swing up and stabilize the pendulum at the upright position with minimal torque.*
-
-</div>
+**Extending TRPO for Quadrupedal Locomotion through Central Pattern Generator-Inspired Gait Priors**
 
 ## 📋 Overview
 
-This project implements TRPO, a model-free reinforcement learning algorithm that ensures monotonic policy improvement through trust region constraints. The implementation uses:
+This project extends TRPO to tackle challenging quadrupedal locomotion by incorporating domain knowledge through gait priors. 
 
-- **Gaussian policies** for continuous action spaces
-- **Generalized Advantage Estimation (GAE)** for variance reduction
-- **Conjugate Gradient** for efficient natural gradient computation
-- **Backtracking line search** for step size optimization
-- **Vectorized environments** for parallel data collection
+**Key Finding**: Vanilla TRPO fails to learn natural, symmetric gaits on the Unitree Go1 quadruped. By incorporating a CPG-inspired trotting gait prior and training a residual policy, the agent achieves natural, rhythmic, symmetric locomotion.
 
-## 🎯 Features
+### Core Implementation
+- Full TRPO with natural gradients (conjugate gradient solver) in pytorch
+- Gaussian policies for continuous control
+- GAE for advantage estimation
 
-- ✅ Full TRPO implementation with KL divergence constraints
-- ✅ Vectorized environment support for efficient training
-- ✅ TensorBoard logging for training visualization
-- ✅ Automatic video recording of evaluation episodes
-- ✅ Clean, modular code structure
-- ✅ GPU acceleration support
+## 🎬 Results
+
+<div align="center">
+
+![TRPO Trained Policy](assets/trpo_quadruped_gait_prior.gif)
+
+*CPG-based policy achieving smooth, symmetric trotting gait on Unitree Go1 quadruped.*
+
+</div>
+
+### Experimental Findings
+
+| Approach | Result | Gait Quality |
+|----------|--------|--------------|
+| **Vanilla TRPO** | Failed | Asymmetric, unnatural movements |
+| **CPG + Residual Policy** | ✅ Success | Natural, rhythmic, symmetric trot |
+
+## 🚀 Installation
+
+```bash
+pip install -r requirements.txt
+```
+
+**Requirements**: Python 3.8+, PyTorch 2.0+, MuJoCo, Gymnasium
+
+## 📊 Experiments
+
+### 1. Standard MuJoCo Tasks (Baseline)
+
+Train TRPO on standard continuous control benchmarks:
+
+```bash
+python main.py --env_id Hopper-v5 --num_envs 32 --epochs 1000
+```
+
+**Supported environments**: `BipedalWalker-v3`, `Hopper-v5`, `Walker2d-v5`, `Swimmer-v5`, `InvertedPendulum-v5`
+
+**Monitor training**:
+```bash
+tensorboard --logdir runs/
+```
+
+### 2. Quadruped Locomotion - Vanilla TRPO (Baseline)
+
+Direct joint control without gait priors:
+
+```bash
+python train_quadruped.py
+```
+
+**Configuration**: `configs/config_standard.yaml`
+- Action space: 12D joint positions
+- Observation: 34D (joint states, base pose/velocity)
+- Environments: 4 parallel
+- Training: 5000 epochs
+
+**Expected outcome**: Agent struggles to learn coordinated gait patterns, exhibits asymmetric and unnatural movements.
+
+### 3. Quadruped Locomotion - CPG-based (Main Result)
+
+Residual policy trained on top of trotting gait prior:
+
+```bash
+python train_quadruped_cpg.py
+```
+
+**Configuration**: `configs/config_cpg.yaml`
+- Action space: 12D residual actions (added to base trot)
+- Base controller: 1 Hz trotting gait (diagonal leg pairs)
+- Policy learns: Gait modulation for forward locomotion
+- Environments: 32 parallel
+- Training: 2000 epochs
+
+**Expected outcome**: Natural, symmetric trotting gait with smooth forward locomotion.
+
+## ⚙️ Configuration
+
+Modify hyperparameters via YAML configs in `configs/`:
+
+```yaml
+train:
+  epochs: 2000
+  steps_per_epoch: 200
+  num_envs: 32
+  hidden_dim: 128
+  
+env:
+  timestep: 0.005      # 200 Hz simulation
+  frame_skip: 10       # 20 Hz control
+  stiffness_scale: 0.33  # Reduced stiffness for compliance
+  
+reward:
+  forward_velocity: 2.0
+  alive_bonus: 0.5
+```
 
 ## 📁 Project Structure
 
 ```
 DRL_Project_TRPO/
-├── main.py                 # Main training script with TRPO algorithm
-├── actor_critic.py         # Policy and value network definitions
-├── data_collection.py      # Rollout buffer and GAE computation
-├── evaluate.py             # Script to evaluate trained policies
-├── config.py               # Configuration parameters
-├── requirements.txt        # Python dependencies
-├── runs/                   # TensorBoard logs, videos, and checkpoints
-├── .gitignore             # Git ignore file
-└── README.md              # This file
+├── main.py                    # TRPO for standard Gym/MuJoCo tasks
+├── train_quadruped.py         # Vanilla TRPO for Go1 quadruped
+├── train_quadruped_cpg.py     # CPG-based TRPO for Go1
+├── actor_critic.py            # Policy and value networks
+├── quadruped_env.py           # Standard quadruped environment
+├── quadruped_env_cpg.py       # CPG-based environment with gait prior
+├── data_collection.py         # Rollout buffer and GAE
+├── requirements.txt           # Python dependencies
+├── configs/                   # Training configurations
+│   ├── config_standard.yaml   # Vanilla TRPO config
+│   ├── config_cpg.yaml        # CPG-based config
+│   └── README.md              # Config documentation
+├── mujoco_menagerie/          # Unitree Go1 robot model
+├── assets/                    # Demo videos and GIFs
+├── docs/                      # Additional documentation
+└── scratchpad/                # Testing and development scripts
 ```
 
-## 🚀 Quick Start
+## 🔬 Technical Details
 
-### Prerequisites
+### CPG-Inspired Gait Prior
 
-```bash
-# Python 3.8+
-# Install all dependencies
-pip install -r requirements.txt
-```
+The base trotting controller generates coordinated leg movements:
 
-Or install manually:
-```bash
-pip install torch torchvision
-pip install gymnasium[classic-control]
-pip install tensorboard
-pip install numpy tqdm opencv-python
-```
+- **Diagonal pairs**: FR+RL (phase 0), FL+RR (phase π)
+- **Frequency**: 1 Hz base rhythm
+- **Amplitudes**: Hip (0.0), Thigh (0.3), Calf (0.3 rad)
 
-### Training
+Policy outputs 12D residual actions scaled by 0.2 and added to base gait.
 
-Run the default training configuration (Pendulum-v1):
+### TRPO Algorithm
 
-```bash
-python main.py
-```
+1. Collect rollouts using current policy
+2. Compute advantages via GAE (γ=0.99, λ=0.97)
+3. Compute policy gradient of surrogate objective
+4. Solve for natural gradient using conjugate gradient
+5. Backtracking line search with KL constraint (δ=0.01)
+6. Update value function (10 epochs of regression)
 
-This will:
-- Train TRPO for 1000 epochs
-- Use 16 parallel environments
-- Collect 200 steps per epoch per environment (3,200 transitions per update)
-- Evaluate and record videos every 40 epochs
-- Save logs, videos, and checkpoints to `runs/trpo_pendulum/pendulum_<timestamp>/`
+## 📈 Monitoring
 
-### Monitoring Training
+TensorBoard logs key metrics:
 
-View training progress with TensorBoard:
+- **Rollout/Epoch_Reward**: Episode returns
+- **Policy/KL_Divergence**: Trust region constraint
+- **State/forward_velocity**: Locomotion speed
+- **Rewards/**: Individual reward components
 
-```bash
-tensorboard --logdir=runs/trpo_pendulum
-```
-
-Then open your browser to `http://localhost:6006`
-
-## 📊 Tracked Metrics
-
-The implementation logs the following metrics to TensorBoard:
-
-### Training Metrics
-- **Loss/Surrogate**: Policy surrogate loss
-- **Loss/Value**: Value function MSE loss
-- **Policy/KL_Divergence**: KL divergence between old and new policy
-- **Policy/Entropy**: Policy entropy (exploration measure)
-- **Policy/Actual_Improvement**: Actual improvement in surrogate objective
-- **Rollout/Epoch_Reward**: Average reward per epoch
-
-### Evaluation Metrics
-- **Eval/Average_Return**: Average return over evaluation episodes
-
-## 🎮 Supported Environments
-
-This implementation will _most probably_ work with any Gymnasium environment with continuous action spaces:
-
-- **Pendulum-v1** (default)
-- **LunarLanderContinuous-v2**
-- **BipedalWalker-v3**
-- **HalfCheetah-v4** (MuJoCo)
-- **Hopper-v4** (MuJoCo)
-- And more...
-
-### Changing Environments
-
-To train on a different environment, modify the `__main__` section in `main.py`:
-
-```python
-# Example: LunarLanderContinuous-v2
-envs = gym.vector.SyncVectorEnv([
-    lambda: gym.make("LunarLanderContinuous-v2") for _ in range(num_envs)
-])
-eval_env = gym.make("LunarLanderContinuous-v2", render_mode="rgb_array")
-
-obs_dim = 8  # Update based on environment
-act_dim = 2  # Update based on environment
-```
-
-## ⚙️ Hyperparameters
-
-Key hyperparameters and their default values:
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `epochs` | 1000 | Number of training epochs |
-| `steps_per_epoch` | 200 | Steps collected per environment per epoch |
-| `n_envs` | 16 | Number of parallel environments |
-| `gamma` | 0.99 | Discount factor |
-| `lam` | 0.97 | GAE lambda parameter |
-| `delta` | 0.01 | KL divergence constraint |
-| `cg_iters` | 10 | Conjugate gradient iterations |
-| `val_func_epochs` | 10 | Value function training epochs per update |
-| `eval_freq` | 40 | Evaluation frequency (in epochs) |
-
-## 🎥 Video Recording
-
-Videos are automatically recorded during training:
-
-- **Periodic evaluation**: Every `eval_freq` epochs, 3 episodes are recorded
-- **Final evaluation**: 5 episodes recorded at the end of training
-- **Location**: `runs/trpo_pendulum/pendulum_<timestamp>/`
-- **Format**: MP4 files
-
-Videos are named:
-- `epoch_<N>-episode-<M>.mp4` for periodic evaluations
-- `final-episode-<M>.mp4` for final evaluation
-
-## 🧮 Algorithm Details
-
-### TRPO Update Steps
-
-1. **Collect Rollouts**: Gather trajectories using current policy
-2. **Compute Advantages**: Use GAE for advantage estimation
-3. **Policy Gradient**: Compute surrogate loss gradient
-4. **Natural Gradient**: Solve Fisher-vector product using conjugate gradient
-5. **Step Size**: Compute optimal step size from KL constraint
-6. **Line Search**: Backtracking line search for valid update
-7. **Value Update**: Fit value function with MSE loss
-
-### Key Equations
-
-**Surrogate Objective:**
-```
-L(θ) = E[π_θ(a|s) / π_θ_old(a|s) * A(s,a)]
-```
-
-**KL Constraint:**
-```
-E[KL(π_θ_old || π_θ)] ≤ δ
-```
-
-**GAE:**
-```
-A_t = Σ(γλ)^l δ_{t+l}
-where δ_t = r_t + γV(s_{t+1}) - V(s_t)
-```
-
-## 📈 Expected Results
-
-### Pendulum-v1
-
-- **Random Policy**: ~-1600 to -1200
-- **Trained Policy**: -200 to -150 (after ~500-800 epochs)
-
-The pendulum should learn to swing up and balance within the first few hundred epochs.
-
-## 🔧 Code Structure
-
-### `main.py`
-- `conjugate_gradient()`: Solves Ax=b using CG method
-- `fisher_vector_product()`: Computes Fisher-vector product
-- `trpo_update()`: Main TRPO update logic
-- `evaluate_policy()`: Policy evaluation with video recording
-- `train_trpo()`: Main training loop
-
-### `actor_critic.py`
-- `GaussianPolicy`: Continuous policy with diagonal Gaussian distribution
-- `ValueNetwork`: State-value function approximator
-
-### `data_collection.py`
-- `RolloutBuffer`: Stores trajectory data
-- `compute_gae()`: Computes GAE advantages and returns
+Videos recorded every 100 epochs to `runs/trpo_quadruped/`.
 
 ## 📚 References
 
-1. **TRPO Paper**: [Trust Region Policy Optimization (Schulman et al., 2015)](https://arxiv.org/abs/1502.05477)
-2. **GAE Paper**: [High-Dimensional Continuous Control Using Generalized Advantage Estimation (Schulman et al., 2015)](https://arxiv.org/abs/1506.02438)
-3. **Spinning Up in Deep RL**: [OpenAI's TRPO Documentation](https://spinningup.openai.com/en/latest/algorithms/trpo.html)
+1. [Trust Region Policy Optimization (Schulman et al., 2015)](https://arxiv.org/abs/1502.05477)
+2. [Generalized Advantage Estimation (Schulman et al., 2015)](https://arxiv.org/abs/1506.02438)
+3. [OpenAI Spinning Up - TRPO](https://spinningup.openai.com/en/latest/algorithms/trpo.html)
 
 ---
 
