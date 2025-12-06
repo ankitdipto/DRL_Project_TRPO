@@ -1,3 +1,6 @@
+import os
+os.environ["MUJOCO_GL"] = "egl"
+
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
@@ -12,7 +15,8 @@ from data_collection import RolloutBuffer
 
 from tqdm import tqdm
 from datetime import datetime
-import os
+from collections import deque
+import argparse
 
 # Set device
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -245,6 +249,7 @@ def train_trpo(
     log_dir="runs/trpo",
     eval_env=None,
     eval_freq=50,
+    env_id=None,  # Environment ID for creating fresh eval environments
 ):
     """
     Train TRPO with vectorized environments.
@@ -268,7 +273,7 @@ def train_trpo(
     
     value_func_optimizer = optim.Adam(value_net.parameters(), lr=3e-4)
 
-    run_name = f"bipedal_walker_{datetime.now().strftime('%m_%d_%H_%M_%S')}"
+    run_name = f"{datetime.now().strftime('%m_%d_%H_%M_%S')}_envs{n_envs}_hzn{steps_per_epoch}"
     run_dir = os.path.join(log_dir, run_name)
     writer = SummaryWriter(log_dir=run_dir)
     
@@ -277,14 +282,13 @@ def train_trpo(
     # episode_lengths = [0 for _ in range(num_envs)]
     # completed_episodes = []
     
+    completed_episode_returns = deque(maxlen=n_envs)
     global_step = 0
+    obs, _ = envs.reset(seed=seed)
+    ep_rews = np.zeros(n_envs)
 
     for epoch in tqdm(range(epochs), desc="Training"):
         buffer = RolloutBuffer(steps_per_epoch, n_envs, n_obs, n_acts)
-        
-        # Reset environment
-        obs, _ = envs.reset(seed=seed)
-        ep_rews = np.zeros(n_envs)
 
         # ---------- Collect Rollout ----------
         for t in range(steps_per_epoch):
@@ -302,9 +306,14 @@ def train_trpo(
             dones = np.logical_or(terminateds, truncateds)
 
             ep_rews += rews
-            # if dones.any():
-            #     ep_rews[dones] = 0.0
-
+            # Find environments that just completed episodes
+            new_ids = np.where(dones)[0]  # More explicit than nonzero() for 1D arrays
+            if len(new_ids) > 0:
+                # Save completed episode returns before resetting
+                completed_episode_returns.extend(ep_rews[new_ids].tolist())
+                # Reset rewards for completed episodes
+                ep_rews[new_ids] = 0.0
+            
             # Store transitions for each environment
             buffer.add(t, obs_tensor, actions, logp_t, rews, vals, dones)
 
@@ -342,41 +351,67 @@ def train_trpo(
         )
 
         # ---------- Logging ----------
-        # if completed_episodes:
-        #     avg_return = np.mean([ep['return'] for ep in completed_episodes])
-        #     avg_length = np.mean([ep['length'] for ep in completed_episodes])
-        #     writer.add_scalar("Rollout/Episode_Return", avg_return, global_step)
-        #     writer.add_scalar("Rollout/Episode_Length", avg_length, global_step)
-        #     writer.add_scalar("Rollout/Num_Episodes", len(completed_episodes), global_step)
-        #     completed_episodes = []
+        # Log completed episode returns (more meaningful than incomplete episodes)
+        if len(completed_episode_returns) > 0:
+            avg_completed_return = np.mean(completed_episode_returns)
+        else:
+            avg_completed_return = 0.0
         
-        # Log current epoch rewards
-        avg_ep_rew = np.mean(ep_rews)
-        writer.add_scalar("Rollout/Epoch_Reward", avg_ep_rew, epoch)
+        writer.add_scalar("Rollout/Episode_Return", avg_completed_return, epoch)
+        # writer.add_scalar("Rollout/Num_Completed_Episodes", len(completed_episode_returns), epoch)
+        
+        # Also log current (incomplete) episode rewards for reference
+        # avg_ep_rew = np.mean(ep_rews)
+        # writer.add_scalar("Rollout/Epoch_Reward", avg_ep_rew, epoch)
 
         # Periodic evaluation with video recording
         if eval_env is not None and (epoch + 1) % eval_freq == 0:
             print(f"\n{'='*60}")
             print(f"Evaluating at Epoch {epoch+1}:")
             
+            # Create a fresh environment for evaluation to avoid renderer corruption
+            # This is important for MuJoCo environments with EGL rendering
+            # The renderer can get corrupted when RecordVideo wrapper is closed/reused
+            if env_id is not None:
+                fresh_eval_env = gym.make(env_id, render_mode="rgb_array")
+            else:
+                # Fallback: try to get env_id from eval_env spec
+                try:
+                    # Unwrap to get the base environment if wrapped
+                    base_env = eval_env
+                    while hasattr(base_env, 'env'):
+                        base_env = base_env.env
+                    env_id_from_spec = base_env.spec.id if hasattr(base_env, 'spec') and base_env.spec else None
+                    if env_id_from_spec:
+                        fresh_eval_env = gym.make(env_id_from_spec, render_mode="rgb_array")
+                    else:
+                        # Last resort: use the existing eval_env (may have issues)
+                        fresh_eval_env = eval_env
+                except Exception as e:
+                    print(f"Warning: Could not create fresh eval env: {e}. Using existing env.")
+                    fresh_eval_env = eval_env
+            
             # Wrap environment with video recorder
             video_env = gym.wrappers.RecordVideo(
-                eval_env,
+                fresh_eval_env,
                 video_folder=run_dir,
                 episode_trigger=lambda x: True,  # Record all episodes
                 name_prefix=f"epoch_{epoch+1}"
             )
             
-            avg_eval_return = evaluate_policy(video_env, policy, num_episodes=3)
+            avg_eval_return = evaluate_policy(video_env, policy, num_episodes=1)
             print(f"Average Evaluation Return: {avg_eval_return:.2f}")
             print(f"Videos saved to: {run_dir}/")
             print(f"{'='*60}\n")
             
             video_env.close()
+            # Only close if we created a fresh environment
+            if fresh_eval_env is not eval_env:
+                fresh_eval_env.close()
             writer.add_scalar("Eval/Average_Return", avg_eval_return, epoch)
             
             # Save checkpoint
-            checkpoint_path = os.path.join(run_dir, f"policy_epoch_{epoch+1}.pth")
+            checkpoint_path = os.path.join(run_dir, f"model_{epoch+1}.pth")
             torch.save(policy.state_dict(), checkpoint_path)
             print(f"Checkpoint saved to: {checkpoint_path}")
 
@@ -384,7 +419,7 @@ def train_trpo(
         #     print(f"Epoch {epoch}, Global Step {global_step}, TRPO success: {success}, Avg Reward: {avg_ep_rew:.2f}")
     
     # Save final checkpoint
-    final_checkpoint = os.path.join(run_dir, "policy_final.pth")
+    final_checkpoint = os.path.join(run_dir, "model_final.pth")
     torch.save(policy.state_dict(), final_checkpoint)
     print(f"\nFinal checkpoint saved to: {final_checkpoint}")
     
@@ -395,27 +430,53 @@ def train_trpo(
 
 
 if __name__ == "__main__":
-    # Example: Train TRPO on Pendulum-v1 with 8 parallel environments
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--env_id", type=str, default="BipedalWalker-v3")
+    parser.add_argument("--num_envs", type=int, default=32)
+    parser.add_argument("--epochs", type=int, default=1000)
+    parser.add_argument("--steps_per_epoch", type=int, default=200)
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--lam", type=float, default=0.97)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--eval_freq", type=int, default=50)
+
+    args = parser.parse_args()
+
     print("=" * 60)
-    print("Training TRPO on BipedalWalker-v3")
+    print(f"Training TRPO on {args.env_id}")
     print("=" * 60)
     
     # Create vectorized environment for training
-    num_envs = 16
     envs = gym.vector.SyncVectorEnv([
-        lambda: gym.make("BipedalWalker-v3") for _ in range(num_envs)
+        lambda: gym.make(args.env_id) for _ in range(args.num_envs)
     ])
     
     # Create separate environment for evaluation/video recording
     # Use render_mode="rgb_array" for video recording (works on remote servers)
-    eval_env = gym.make("BipedalWalker-v3", render_mode="rgb_array")
+    eval_env = gym.make(args.env_id, render_mode="rgb_array")
     
     # Get environment dimensions
-    obs_dim = 24  # BipedalWalker-v3 has 24D observations
-    act_dim = 4  # BipedalWalker-v3 has 4D continuous action
-    
-    print(f"Environment: BipedalWalker-v3")
-    print(f"Number of parallel environments: {num_envs}")
+    if args.env_id == "BipedalWalker-v3":
+        obs_dim = 24
+        act_dim = 4
+    elif args.env_id == "Hopper-v5":
+        obs_dim = 11
+        act_dim = 3
+    elif args.env_id == "Swimmer-v5":
+        obs_dim = 8
+        act_dim = 2
+    elif args.env_id == "Walker2d-v5":
+        obs_dim = 17
+        act_dim = 6
+    elif args.env_id == "InvertedPendulum-v5":
+        obs_dim = 4
+        act_dim = 1
+    else:
+        raise ValueError(f"Environment {args.env_id} not supported")
+
+    print(f"Environment: {args.env_id}")
+    print(f"Number of parallel environments: {args.num_envs}")
     print(f"Observation dimension: {obs_dim}")
     print(f"Action dimension: {act_dim}")
     print(f"Video recording: Enabled (every 50 epochs)")
@@ -425,21 +486,24 @@ if __name__ == "__main__":
     policy = GaussianPolicy(obs_dim, act_dim, hidden_dim=64)
     value_net = ValueNetwork(obs_dim, hidden_dim=64)
     
+    LOG_DIR = f"runs/{args.env_id}"
     # Train
     run_dir = train_trpo(
         envs=envs,
         policy=policy,
         value_net=value_net,
-        epochs=1000,
-        steps_per_epoch=200,
-        gamma=0.99,
-        lam=0.97,
-        log_dir="runs/trpo_bipedal_walker",
-        n_envs=num_envs,
+        epochs=args.epochs,
+        steps_per_epoch=args.steps_per_epoch,
+        gamma=args.gamma,
+        lam=args.lam,
+        log_dir=LOG_DIR,
+        n_envs=args.num_envs,
         n_obs=obs_dim,
         n_acts=act_dim,
         eval_env=eval_env,
-        eval_freq=40,  # Evaluate and record video every 40 epochs
+        eval_freq=args.eval_freq,  # Evaluate and record video every 40 epochs
+        seed=args.seed,
+        env_id=args.env_id,  # Pass env_id for creating fresh eval environments
     )
     
     # Final evaluation with video
@@ -462,6 +526,6 @@ if __name__ == "__main__":
     
     print("\n" + "=" * 60)
     print("Training complete!")
-    print("View logs with: tensorboard --logdir=runs/trpo_bipedal_walker")
+    print(f"View logs with: tensorboard --logdir={LOG_DIR}")
     print(f"View videos in: {run_dir}/")
     print("=" * 60)

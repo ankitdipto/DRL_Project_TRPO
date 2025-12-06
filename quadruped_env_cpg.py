@@ -187,7 +187,8 @@ class QuadrupedEnvCPG(gym.Env):
         """
         # Forward velocity (PRIMARY OBJECTIVE)
         forward_vel = self.data.qvel[0]
-        vel_reward = self.reward_weights['forward_velocity'] * forward_vel
+        exp_vel = np.exp(-(forward_vel - 0.40) ** 2 / 0.30 ** 2)
+        vel_reward = self.reward_weights['forward_velocity'] * exp_vel
         
         # Alive bonus
         alive_bonus = self.reward_weights['alive_bonus']
@@ -380,10 +381,10 @@ class QuadrupedEnvCPG(gym.Env):
         
         if self.camera_mode == "follow":
             # Follow camera: tracks robot from behind and above
-            lookat_offset = np.array([0.5, 0.0, 0.0])  # Look slightly ahead
+            lookat_offset = np.array([0.2, 0.0, 0.0])  # Look slightly ahead
             
             self._camera.lookat[:] = robot_pos + lookat_offset
-            self._camera.distance = 2.5
+            self._camera.distance = 1.5
             self._camera.azimuth = 90  # View from behind
             self._camera.elevation = -20  # Slight downward angle
             

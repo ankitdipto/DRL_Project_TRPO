@@ -20,11 +20,12 @@ env:
   model_file: "unitree_go1/scene.xml"
   timestep: 0.005  # 1/200
   frame_skip: 10
-  max_episode_steps: 3000
+  max_episode_steps: 1000
   gait_type: "trot"  # trot, bound, or adaptive
   run_prefix: "Go1_CPG"
   damping_scale: 1.0
   stiffness_scale: 0.33
+  camera_mode: "follow"  # Camera mode for video recording: "follow" (tracks robot), "fixed" (static), "side" (side view), "top" (top-down)
 
 # Reward weights for CPG control
 reward:

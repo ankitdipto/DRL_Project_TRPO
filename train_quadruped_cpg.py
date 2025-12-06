@@ -23,7 +23,7 @@ import statistics
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-from actor_critic_cpg import CPGModulatingPolicy, ValueNetwork
+from actor_critic import CPGModulatingPolicy, ValueNetwork
 from data_collection import RolloutBuffer
 from quadruped_env_cpg import QuadrupedEnvCPG
 
@@ -234,7 +234,8 @@ def train_trpo_cpg(
     damping_scale=1.0,
     stiffness_scale=1.0,
     obs_dim=-1,
-    act_dim=-1
+    act_dim=-1,
+    camera_mode='follow',  # Camera mode for video recording: 'follow', 'fixed', 'side', 'top'
 ):
     """
     Train TRPO with CPG-based control.
@@ -252,11 +253,9 @@ def train_trpo_cpg(
     run_dir = os.path.join(log_dir, run_name)
     writer = SummaryWriter(log_dir=run_dir)
     
-    global_step = 0
-    
     # Create training environments
-    train_envs = [
-        QuadrupedEnvCPG(
+    train_envs = gym.vector.SyncVectorEnv([
+        lambda: QuadrupedEnvCPG(
             model_path=model_path,
             gait_type=gait_type,
             max_episode_steps=max_episode_steps,
@@ -267,9 +266,9 @@ def train_trpo_cpg(
             stiffness_scale=stiffness_scale,
         )
         for _ in range(num_envs)
-    ]
+    ])
     
-    # Create evaluation environment
+    # Create evaluation environment with camera following enabled
     eval_env = QuadrupedEnvCPG(
         model_path=model_path,
         gait_type=gait_type,
@@ -280,6 +279,7 @@ def train_trpo_cpg(
         reward_weights=reward_weights,
         damping_scale=damping_scale,
         stiffness_scale=stiffness_scale,
+        camera_mode=camera_mode,  # Camera follows robot during video recording
     )
 
     print(f"\n{'='*70}")
@@ -293,18 +293,18 @@ def train_trpo_cpg(
     print(f"{'='*70}\n")
 
     # Reset environments
-    env_obs = [env.reset(seed=seed+i)[0] for i, env in enumerate(train_envs)]
+    global_step = 0
+    env_obs, infos = train_envs.reset(seed=seed)
+    ep_rews = np.zeros(num_envs)
+    ep_lens = np.zeros(num_envs)
+    rewbuffer = deque(maxlen=10)
 
     for epoch in tqdm(range(epochs), desc="Training"):
         buffer = RolloutBuffer(steps_per_epoch, num_envs, obs_dim, act_dim)
-        rewbuffer = deque(maxlen=num_envs * 10)
         
-        ep_rews = np.zeros(num_envs)
-        ep_lens = np.zeros(num_envs)
-
         # Collect rollouts
         for t in range(steps_per_epoch):
-            obs_tensor = torch.tensor(np.array(env_obs), dtype=torch.float32).to(device)
+            obs_tensor = torch.tensor(env_obs, dtype=torch.float32).to(device)
             
             with torch.no_grad():
                 actions, logp_t = policy.get_action(obs_tensor)
@@ -312,36 +312,26 @@ def train_trpo_cpg(
                 vals = value_net(obs_tensor)
 
             # Step environments
-            next_obs = []
-            rews = []
-            dones = []
+            # for i, env in enumerate(train_envs):
+            next_obs, rews, terminateds, truncateds, infos = train_envs.step(acts)
+            dones = np.logical_or(terminateds, truncateds)
             
-            for i, env in enumerate(train_envs):
-                obs, reward, terminated, truncated, info = env.step(acts[i])
-                done = terminated or truncated
-                
-                next_obs.append(obs)
-                rews.append(reward)
-                dones.append(done)
-                
-                ep_rews[i] += reward
-                ep_lens[i] += 1
-                
-                if done:
-                    rewbuffer.append(ep_rews[i])
-                    ep_rews[i] = 0.0
-                    ep_lens[i] = 0
-                    obs, _ = env.reset()
-                    next_obs[-1] = obs
+            ep_rews += rews
+            ep_lens += 1
             
-            rews = np.array(rews)
-            dones = np.array(dones)
+            new_ids = np.where(dones)[0]
+            if len(new_ids) > 0:
+                rewbuffer.extend(ep_rews[new_ids].tolist())
+                ep_rews[new_ids] = 0.0
+                ep_lens[new_ids] = 0
             
+            # Store transitions for each environment
             buffer.add(t, obs_tensor, actions, logp_t, rews, vals, dones)
+            
             env_obs = next_obs
             global_step += num_envs
 
-        # Compute advantages
+        # ----------- Compute advantages and returns -----------
         with torch.no_grad():
             obs_tensor = torch.tensor(np.array(env_obs), dtype=torch.float32).to(device)
             last_vals = value_net(obs_tensor)
@@ -376,18 +366,18 @@ def train_trpo_cpg(
             avg_ep_rew = 0.0
 
         writer.add_scalar("Rollout/Epoch_Reward", avg_ep_rew, epoch)
-        writer.add_scalar("Rewards/reward_forward", info['reward_forward'], epoch)
-        writer.add_scalar("Rewards/reward_alive", info['reward_alive'], epoch)
-        writer.add_scalar("Rewards/reward_smoothness", info['reward_smoothness'], epoch)
-        writer.add_scalar("Rewards/reward_orientation", info['reward_orientation'], epoch)
-        writer.add_scalar("Rewards/reward_energy", info['reward_energy'], epoch)
-        writer.add_scalar("Rewards/reward_joint_limits", info['reward_joint_limits'], epoch)
-        writer.add_scalar("Rewards/reward_height", info['reward_height'], epoch)
-        writer.add_scalar("Rewards/reward_lateral", info['reward_lateral'], epoch)
-        writer.add_scalar("Rewards/reward_angular", info['reward_angular'], epoch)
-        writer.add_scalar("State/forward_velocity", info['forward_velocity'], epoch)
-        writer.add_scalar("State/base_height", info['base_height'], epoch)
-        writer.add_scalar("State/orientation_w", info['orientation_w'], epoch)
+        writer.add_scalar("Rewards/reward_forward", infos['reward_forward'].mean(), epoch)
+        writer.add_scalar("Rewards/reward_alive", infos['reward_alive'].mean(), epoch)
+        writer.add_scalar("Rewards/reward_smoothness", infos['reward_smoothness'].mean(), epoch)
+        writer.add_scalar("Rewards/reward_orientation", infos['reward_orientation'].mean(), epoch)
+        writer.add_scalar("Rewards/reward_energy", infos['reward_energy'].mean(), epoch)
+        writer.add_scalar("Rewards/reward_joint_limits", infos['reward_joint_limits'].mean(), epoch)
+        writer.add_scalar("Rewards/reward_height", infos['reward_height'].mean(), epoch)
+        writer.add_scalar("Rewards/reward_lateral", infos['reward_lateral'].mean(), epoch)
+        writer.add_scalar("Rewards/reward_angular", infos['reward_angular'].mean(), epoch)
+        writer.add_scalar("State/forward_velocity", infos['forward_velocity'].mean(), epoch)
+        writer.add_scalar("State/base_height", infos['base_height'].mean(), epoch)
+        writer.add_scalar("State/orientation_w", infos['orientation_w'].mean(), epoch)
         
         if epoch % 10 == 0:
             print(f"\nEpoch {epoch}/{epochs}")
@@ -439,8 +429,8 @@ def train_trpo_cpg(
     print(f"\nFinal checkpoint saved to: {final_checkpoint}")
     
     # Cleanup
-    for env in train_envs:
-        env.close()
+    
+    train_envs.close()
     eval_env.close()
     writer.close()
     
@@ -485,6 +475,7 @@ def main(cfg: DictConfig) -> None:
     
     # Train
     print("\nStarting training...")
+    camera_mode = cfg.env.get('camera_mode', 'follow')  # Default to 'follow' if not specified
     run_dir = train_trpo_cpg(
         policy=policy,
         value_net=value_net,
@@ -507,6 +498,7 @@ def main(cfg: DictConfig) -> None:
         stiffness_scale=cfg.env.stiffness_scale,
         obs_dim=obs_dim,
         act_dim=act_dim,
+        camera_mode=camera_mode,
     )
 
     # Save the config as a YAML file in the run_dir

@@ -25,7 +25,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from actor_critic import GaussianPolicy, ValueNetwork
 from data_collection import RolloutBuffer
-from quadruped_env import CustomVectorizedQuadrupedEnv, QuadrupedEnv, make_quadruped_env
+from quadruped_env import QuadrupedEnv, make_quadruped_env
 
 # Set device
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -286,7 +286,7 @@ def evaluate_policy(env, policy, num_episodes=3):
 
 
 def train_trpo_quadruped(
-    vec_env: CustomVectorizedQuadrupedEnv | gym.vector.SyncVectorEnv,
+    vec_env: gym.vector.SyncVectorEnv,
     policy: GaussianPolicy,
     value_net: ValueNetwork,
     epochs=5000,
@@ -297,8 +297,7 @@ def train_trpo_quadruped(
     log_dir="runs/trpo_quadruped",
     eval_env=None,
     eval_freq=100,
-    save_freq=100,
-    reward_weights=None,
+    save_freq=100
 ):
     """
     Train TRPO on quadruped locomotion task.
@@ -515,8 +514,7 @@ def main(cfg: DictConfig) -> None:
     
     vec_env = make_quadruped_env(
         num_envs=cfg.train.num_envs, 
-        model_path=os.path.join(cfg.env.model_dir, cfg.env.model_file), 
-        use_rollout=cfg.env.use_rollout, 
+        model_path=os.path.join(cfg.env.model_dir, cfg.env.model_file),  
         timestep=cfg.env.timestep,
         frame_skip=cfg.env.frame_skip, 
         max_episode_steps=cfg.env.max_episode_steps,
@@ -527,6 +525,7 @@ def main(cfg: DictConfig) -> None:
 
     # Create separate environment for evaluation/video recording
     print("Creating evaluation environment...")
+    camera_mode = cfg.env.get('camera_mode', 'follow')  # Default to 'follow' if not specified
     eval_env = QuadrupedEnv(
         model_path=os.path.join(cfg.env.model_dir, cfg.env.model_file),
         render_mode="rgb_array",
@@ -536,6 +535,7 @@ def main(cfg: DictConfig) -> None:
         reward_weights=reward_weights,
         damping_scale=cfg.env.damping_scale,
         stiffness_scale=cfg.env.stiffness_scale,
+        camera_mode=camera_mode,  # Camera follows robot during video recording
     )
     
     # Get environment dimensions
@@ -568,8 +568,7 @@ def main(cfg: DictConfig) -> None:
         log_dir=cfg.logging.log_dir,
         eval_env=eval_env,
         eval_freq=cfg.train.eval_freq,
-        save_freq=cfg.train.save_freq,
-        reward_weights=reward_weights,
+        save_freq=cfg.train.save_freq
     )
     
     # Save the config as a YAML file in the run_dir
